@@ -1,0 +1,790 @@
+---
+title: "Behind Bazball - A Statistical Analysis of England's New Approach to Test
+  Cricket"
+author: "Ricardo Morelli"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    css: styles.css
+  pdf_document: default
+  word_document: default
+---
+
+```{r Setup, include = FALSE}
+knitr::opts_chunk$set(echo = FALSE, eval = TRUE, message = FALSE, warning = FALSE, tidy = TRUE)
+library(cricketdata)
+library(tidyverse)
+library(snakecase)
+library(naniar)
+library(scales)
+library(purrr)
+library(tidytext)
+library(ggrepel)
+```
+
+```{r Data Import & Cleaning, include = FALSE}
+# Test match bbb
+test_bbb <- fetch_cricsheet("bbb", "male", "tests")
+
+names(test_bbb) <- to_snake_case(names(test_bbb))
+
+fct_cols <- c('match_id', 'season', 'venue', 'innings', 'batting_team', 'bowling_team', 'striker',
+              'non_striker', 'bowler', 'wicket_type', 'player_dismissed', 'other_player_dismissed')
+
+test_bbb <- 
+  test_bbb |> 
+  mutate_at(fct_cols, factor)
+
+test_bbb$bazball <- factor(ifelse(test_bbb$start_date >= "2022-05-01", "bazball", "pre_bazball"))
+test_bbb$england_others <- factor(ifelse(test_bbb$batting_team == "England", "England", "All_Others"))
+test_bbb$start_date <- as.Date(test_bbb$start_date)
+
+test_bbb <- test_bbb |> 
+  replace_with_na(list(player_dismissed = "")) |> 
+  replace_with_na(list(wicket_type = "")) |> 
+  filter(start_date >= "2004-01-01")
+
+test_batting_data <- test_bbb |>
+  group_by(start_date, match_id, innings, bazball, batting_team, striker) |> 
+  summarise(
+    runs = sum(runs_off_bat),
+    extras = sum(extras, na.rm = TRUE),
+    balls_faced = n() - sum(!is.na(wides)),
+    strike_rate = (runs / balls_faced),
+    dismissals = sum(!is.na(player_dismissed)),
+    wicket_type = last(wicket_type)
+  )
+
+test_bowling_data <- test_bbb |>
+  group_by(start_date, match_id, innings, bazball, bowling_team, bowler) |> 
+  summarise(
+    balls_bowled = n() - sum(!is.na(wides)),
+    runs = sum(runs_off_bat),
+    wickets = sum(!is.na(player_dismissed)),
+    extras = sum(extras, na.rm = TRUE),
+    economy = (runs / (balls_bowled/6)),
+    strike_rate = (runs / balls_bowled)
+  )
+
+# Player Meta DF
+names(player_meta) <- to_snake_case(names(player_meta))
+```
+
+<br>
+
+# **What is 'Bazball'?**
+
+After an extended period of abject failure in test cricket, culminating in a devastating 4-0 Ashes series loss to Australia in the summer of 2021-22, England coach Chris Silverwood was sacked. The team embarked on a 3-test series in the West Indies with interim coach Paul Collingwood, aiming to improve their form. However, they returned without a win and recognised the need for changes. A devastated Joe Root resigned from the captaincy, leading to the appointment of Ben Stokes as captain and Brendon ‘Baz’ McCullum as the new head coach. These changes resulted in an immediate and dramatic improvement for the England test team.
+
+McCullum, who retired from playing in 2019, was known for his fast-scoring style and is currently the only international coach to have played extensive T20 cricket in his career. He aimed to incorporate this high-paced style, typically associated with the white-ball cricket, into England’s red ball game.
+
+This philosophy, dubbed ‘Bazball’ emphasizes taking risks to create winning opportunities while accepting the possibility of failure. This approach is applied in each facet of England’s game, headlined by their aggressive scoring rate.
+
+The idea behind scoring runs at a faster pace aims to provide bowlers with more time to take the 20 wickets required to win the match. Numerous test matches have been drawn because teams batted for too long, leaving insufficient time on day 5 to dismiss the opposition. England’s ‘Bazball’ approach prioritises scoring quickly, even at the risk of posting a lower score to ensure they will always have enough time to bowl out the opposition and push for a win.
+
+<br>
+
+# **What does a 'Bazball' innings look like?**
+
+Take a look at England's recent scores compared to all other test innings of the modern era (2004 - Present). Scores under 200 runs were excluded to avoid skewed higher run rates from low score chases.
+
+<br>
+
+```{r Bazball Innings vs All Others, fig.width = 10, fig.height = 6}
+# Facet Labels
+innings_names <- c(
+  `1` = "1ST INNINGS",
+  `2` = "2ND INNINGS",
+  `3` = "3RD INNINGS",
+  `4` = "4TH INNINGS"
+)
+
+# Plot
+test_batting_data |> 
+  group_by(match_id, innings, start_date, batting_team) |> 
+  summarise(
+    innings_runs = sum(runs) + sum(extras),
+    balls_faced = sum(balls_faced)
+  ) |> 
+  mutate(
+    run_rate = innings_runs / (balls_faced/6)
+  ) |> 
+  filter(innings_runs >= 200) |> 
+  ggplot(aes(x = innings_runs, y = run_rate)) +
+  geom_point(aes(color = if_else((start_date >= "2022-05-01") & (batting_team == "England"), "Bazball", "Other"))) +
+  scale_color_manual(values = c("Bazball" = "tomato2", "Other" = "lightgrey"),
+                     breaks = c("Bazball")) +
+  facet_wrap(~innings, labeller = as_labeller(innings_names)) +
+  theme_bw() +
+  theme(
+    plot.title = element_text(size = 22, colour = "black", face = "bold"),
+    plot.subtitle = element_text(size = 20, colour = "tomato2"),
+    panel.border = element_rect(color = "black", fill = NA),
+    legend.text = element_text(size = 10),
+    legend.position = c(0.06,0.94),
+    legend.title = element_blank(),
+    legend.background = element_blank(),
+    legend.key = element_blank(),
+    strip.text = element_text(size = 14, face = "bold"),
+    strip.background = element_rect(color = "black", fill = "lightgrey", linetype = "solid"),
+    axis.title.x = element_text(size = 16, margin = margin(t = 10)),
+    axis.title.y = element_text(size = 16, margin = margin(r = 10)),
+    axis.text = element_text(size = 14)
+  ) +
+  guides(
+    color = guide_legend(override.aes = list(size = 5))
+  ) +
+  labs(
+    title = "TEST INNINGS TOTALS SINCE 2004",
+    subtitle = "Bazball teams are scoring quickly at all stages of the match",
+    caption = "Data from Cricsheet c/o R:cricketdata",
+    x = "Innings Total",
+    y = "Run Rate"
+  )
+
+```
+
+<br>
+
+Bazball appears to be breaking the mould of test batting by maintaining high run rates deep into innings. In a period where run rates are generally in line with modern era averages, Bazball teams are charting in areas rarely seen before.
+
+<br>
+
+```{r Run Rates by Year, fig.width = 10, fig.height = 6}
+# Strike rate
+run_rate_comp <- test_batting_data |> 
+  group_by(year = lubridate::floor_date(start_date, "year"), match_id, batting_team) |> 
+  summarise(
+    avg_rr = mean( sum(runs) / sum(balls_faced/6) )
+  )
+
+# Relative SR over time
+run_rate_comp |> 
+  ggplot(aes(x = year, y = avg_rr)) +
+  geom_point(aes(color = if_else((year >= "2022-01-01") & (batting_team == "England"), "Bazball", "Other")),
+             size = 3, alpha = 0.5, show.legend = FALSE) +
+  scale_color_manual(values = c("Bazball" = "tomato2", "Other" = "darkgrey"),
+                     breaks = c("Bazball")) +
+  scale_x_date(breaks = seq(as.Date("2004-01-01"), as.Date("2024-01-01"), by = "year"), labels = date_format("%Y")) +
+  scale_y_continuous() +
+  theme_bw() +
+  theme(
+    plot.title = element_text(size = 22, colour = "black", face = "bold"),
+    plot.subtitle = element_text(size = 20, colour = "tomato2"),
+    panel.border = element_rect(color = "black", fill = NA),
+    axis.title.x = element_blank(),
+    axis.text.x = element_text(size = 9),
+    axis.text.y = element_text(size = 14)
+  ) +
+  labs(
+    title = "TEST MATCH RUN RATES BY YEAR",
+    subtitle = "Bazball teams are scoring at a historically high run rate",
+    caption = "Data from Cricsheet c/o R:cricketdata",
+    y = "Run Rate"
+  )
+
+```
+
+<br>
+
+# **Who is doing the heavy hitting?**
+
+Sports coaches are measured based on the performance (output) they can elicit from their players. A strong coach will often achieve superior results with the same group of players compared to a less competent coach. Aside from the recent emergence of Harry Brook , McCullum has achieved significantly more than his predecessors with a relatively stable pool of players. The same players who have previously struggled to win a single test in past years are now thriving. This transformation is particularly noteworthy.
+
+<br>
+
+```{r Batting Performance - Bazball Era, fig.width = 10, fig.height = 6}
+library(purrr)
+`%not_in%` <- purrr::negate(`%in%`)
+
+# Quandrant Lines
+batting_quadrant_lines <- test_batting_data |>
+  left_join(player_meta, join_by(striker == unique_name)) |> 
+  filter(start_date > "2022-05-01") |>
+  filter(playing_role %not_in% c('Bowler', 'Wicketkeeper', 'Bowling Allrounder')) |> 
+  filter(!is.na (playing_role)) |> 
+  group_by(striker, batting_team) |> 
+  summarise(
+    runs = sum(runs),
+    strike_rate = mean(strike_rate, na.rm = TRUE)*100,
+    dismissals = sum(dismissals),
+    average = runs / dismissals,
+    matches = n_distinct(match_id)
+  ) |> 
+  filter(matches > 5) |> 
+  ungroup() |> 
+  summarise(
+    global_avg_runs = mean(average, na.rm = TRUE),
+    global_avg_sr = mean(strike_rate, na.rm = TRUE)
+  )
+
+# Plot
+test_batting_data |>
+  left_join(player_meta, join_by(striker == unique_name)) |> 
+  filter(start_date > "2022-05-01") |>
+  filter(playing_role %not_in% c('Bowler', 'Wicketkeeper', 'Bowling Allrounder')) |> 
+  filter(!is.na (playing_role)) |> 
+  group_by(striker, batting_team) |> 
+  summarise(
+    runs = sum(runs),
+    strike_rate = mean(strike_rate, na.rm = TRUE)*100,
+    dismissals = sum(dismissals),
+    average = runs / dismissals,
+    matches = n_distinct(match_id)
+  ) |> 
+  filter(matches > 5) |> 
+  ggplot(aes(x = average, y = strike_rate, size = runs, color = batting_team)) +
+  geom_point(alpha = 0.3, show.legend = TRUE) +
+  geom_vline(data = batting_quadrant_lines, aes(xintercept = global_avg_runs), linetype = "dotdash") +
+  geom_hline(data = batting_quadrant_lines, aes(yintercept = global_avg_sr), linetype = "dotdash") +
+  scale_color_manual(values = c(England = "tomato2")) +
+  scale_x_continuous() +
+  scale_y_continuous() +
+  geom_text_repel(aes(label = striker), max.overlaps = 4, show.legend = FALSE) +
+  theme_bw() +
+  theme(
+    plot.title = element_text(size = 22, colour = "black", face = "bold"),
+    plot.subtitle = element_text(size = 20, colour = "tomato2"),
+    panel.border = element_rect(color = "black", fill = NA),
+    legend.text = element_text(size = 10),
+    legend.key = element_blank(),
+    axis.title.x = element_text(size = 14),
+    axis.title.y = element_text(size = 14),
+    axis.text.x = element_text(size = 14),
+    axis.text.y = element_text(size = 14)
+  ) +
+  guides(
+    color = guide_legend(override.aes = list(size = 5)),
+  ) +
+  labs(
+    title = "BATTING PERFORMANCE IN THE BAZBALL ERA",
+    caption = "Data from Cricsheet c/o R:cricketdata",
+    x = "Average Runs",
+    y = "Strike Rate",
+    color = "Team",
+    size = "Runs"
+  )
+```
+
+<br>
+
+Bazball players are among the prominent batsmen currently in test cricket. On average England are now scoring 11% more runs at a 26% higher strike rate compared to the pre-bazball era. Below is a chart illustrating the changes in individual batting averages and strike rates during this period.
+
+<br>
+
+```{r Batting Averages Pre/Post Bazball, fig.width = 10, fig.height = 6}
+# pre_bazball_batsmen
+pre_bazball_batsmen <- test_batting_data |>
+  filter(start_date < "2022-05-01") |> 
+  filter(batting_team == 'England') |>
+  group_by(striker) |> 
+  summarise(
+    runs = sum(runs),
+    strike_rate = mean(strike_rate, na.rm = TRUE),
+    dismissals = sum(dismissals),
+    average = runs / dismissals,
+    matches = n_distinct(match_id)
+  ) |> 
+  filter(matches > 5)
+
+# post_bazball_batsmen
+post_bazball_batsmen <- test_batting_data |>
+  filter(start_date >= "2022-05-01") |> 
+  filter(batting_team == 'England') |>
+  group_by(striker) |> 
+  summarise(
+    runs = sum(runs),
+    strike_rate = mean(strike_rate, na.rm = TRUE),
+    dismissals = sum(dismissals),
+    average = runs / dismissals,
+    matches = n_distinct(match_id)
+  ) |> 
+  filter(matches > 5)
+
+# Join Pre & post
+pre_post_bazball_batsmen <- pre_bazball_batsmen |> 
+  inner_join(post_bazball_batsmen, join_by(striker)) |> 
+  mutate(
+    strike_rate.x = strike_rate.x*100,
+    strike_rate.y = strike_rate.y*100
+  )
+
+# Average Runs Dumbbell Chart
+pre_post_bazball_batsmen |> 
+  ggplot(aes(y = fct_reorder(as.factor(striker), average.y))) +
+  geom_segment(aes(x = average.x, xend = average.y, yend = striker),
+               linewidth = 1.5, color = "lightgrey") +
+  geom_point(aes(x = average.x, y = striker, colour = "Pre_Bazball"), size = 5) +
+  geom_text(aes(label = round(average.x, 1), x = average.x,
+                hjust = if_else((average.y - average.x) > 0, 1.5, -0.5)),
+            size = 4, color = "black", show.legend = FALSE) +
+  geom_point(aes(x = average.y, y = striker, colour = "Bazball"), size = 5) +
+  geom_text(aes(label = round(average.y, 1), x = average.y,
+                hjust = if_else((average.y - average.x) < 0, 1.5, -0.5)),
+            size = 4, color = "black", show.legend = FALSE) +
+  scale_color_manual(values = c(Pre_Bazball = "lightsalmon", Bazball = "tomato2"),
+                     breaks = c("Pre_Bazball", "Bazball")) +
+  scale_x_continuous(limits = c(3,60), breaks = seq(0, 60, by = 10)) +
+  theme_bw() +
+  theme(
+    plot.title = element_text(size = 22, colour = "black", face = "bold"),
+    plot.subtitle = element_text(size = 20, colour = "tomato2"),
+    panel.border = element_rect(color = "black", fill = NA),
+    legend.title = element_blank(),
+    legend.text = element_text(size = 10),
+    legend.key = element_blank(),
+    axis.title.x = element_text(size = 14),
+    axis.title.y = element_blank(),
+    axis.text.x = element_text(size = 14),
+    axis.text.y = element_text(size = 14)
+  ) +
+  guides(
+    color = guide_legend(override.aes = list(size = 5)),
+  ) +
+  labs(
+    title = "BATTING AVERAGES PRE & POST BAZBALL",
+    subtitle = "Min. 5 tests played either side of May 2022",
+    caption = "Data from Cricsheet c/o R:cricketdata",
+    x = "Average Runs"
+  )
+```
+
+<br>
+
+```{r Strike Rates Pre/Post Bazball, fig.width = 10, fig.height = 6}
+# Strike Rate Dumbbell Chart
+pre_post_bazball_batsmen |> 
+  ggplot(aes(y = fct_reorder(as.factor(striker), strike_rate.y))) +
+  geom_segment(aes(x = strike_rate.x, xend = strike_rate.y, yend = striker),
+               linewidth = 1.5, color = "lightgrey") +
+  geom_point(aes(x = strike_rate.x, y = striker, colour = "Pre_Bazball"), size = 5) +
+  geom_text(aes(label = round(strike_rate.x, 2), x = strike_rate.x,
+                hjust = if_else((strike_rate.y - strike_rate.x) > 0, 1.5, -0.5)),
+            size = 4, color = "black", show.legend = FALSE) +
+  geom_point(aes(x = strike_rate.y, y = striker, colour = "Bazball"), size = 5) +
+  geom_text(aes(label = round(strike_rate.y, 2), x = strike_rate.y,
+                hjust = if_else((strike_rate.y - strike_rate.x) < 0, 1.5, -0.5)),
+            size = 4, color = "black", show.legend = FALSE) +
+  scale_color_manual(values = c(Pre_Bazball = "lightsalmon", Bazball = "tomato2"),
+                     breaks = c("Pre_Bazball", "Bazball")) +
+  scale_x_continuous(limits = c(20,100), breaks = seq(0, 100, by = 10)) +
+  theme_bw() +
+  theme(
+    plot.title = element_text(size = 22, colour = "black", face = "bold"),
+    plot.subtitle = element_text(size = 20, colour = "tomato2"),
+    panel.border = element_rect(color = "black", fill = NA),
+    legend.title = element_blank(),
+    legend.text = element_text(size = 10),
+    legend.key = element_blank(),
+    axis.title.x = element_text(size = 14),
+    axis.title.y = element_blank(),
+    axis.text.x = element_text(size = 14),
+    axis.text.y = element_text(size = 14)
+  ) +
+  guides(
+    color = guide_legend(override.aes = list(size = 5)),
+  ) +
+  labs(
+    title = "BATTING STRIKE RATES PRE & POST BAZBALL",
+    subtitle = "Min. 5 tests played either side of May 2022",
+    caption = "Data from Cricsheet c/o R:cricketdata",
+    x = "Strike Rate",
+  )
+```
+
+<br>
+
+Looking at some of these names, a pertinent question emerges regarding the adaptation of long-term test players to modern styles. Specifically, how have these players been able to increase both their average and strike rates so significantly, even late into their careers?
+
+Bazball is said to encourage a variety of ‘white-ball’ batting techniques which give more freedom to traditional short-form players like Bairstow, but does work for more conservative traditional players like Joe Root? Root has several times been dismissed trying to play fanciful strokes typically outside his repertoire in efforts to fit into the Bazball ‘style’. How has he advanced his batting despite this, and what other factors have this England team employed to support this?
+
+<br>
+
+# **How does England’s bowling attack set their batsmen up for success?**
+
+England’s bowlers perform well, although not as dominant as their batsmen. The pace attack are performing above average, while spinner Jack Leach has fallen out of favour, and youngster Shoab Bashir has yet to prove himself as a long-term replacement.
+
+<br>
+
+```{r Bowling Performance - Bazball Era, fig.width = 10, fig.height = 6}
+# Quadrant Lines
+bowling_quadrant_lines <- test_bowling_data |>
+  left_join(player_meta, join_by(bowler == unique_name)) |> 
+  filter(start_date > "2022-05-01") |>
+  filter(playing_role %in% c('Bowler', 'Bowling Allrounder')) |> 
+  filter(!is.na (playing_role)) |> 
+  filter(!bowler == 'N Wagner') |> 
+  group_by(bowling_team, bowler) |>
+  summarise(
+    balls_bowled = sum(balls_bowled),
+    runs = sum(runs),
+    wickets = sum(wickets),
+    average = runs / wickets,
+    economy = runs / (balls_bowled / 6),
+    strike_rate = runs / balls_bowled,
+    matches = n_distinct(match_id) 
+  ) |> 
+  filter(matches > 5) |> 
+  ungroup() |> 
+  summarise(
+    global_avg_average = mean(average, na.rm = TRUE),
+    global_avg_economy = mean(economy, na.rm = TRUE)
+  )
+
+# Plot
+test_bowling_data |>
+  left_join(player_meta, join_by(bowler == unique_name)) |> 
+  filter(start_date > "2022-05-01") |>
+  filter(playing_role == 'Bowler') |> 
+  filter(!is.na (playing_role)) |> 
+  filter(!bowler == 'N Wagner') |> 
+  group_by(bowling_team, bowler) |> 
+  summarise(
+    balls_bowled = sum(balls_bowled),
+    runs = sum(runs),
+    wickets = sum(wickets),
+    average = runs / wickets,
+    economy = runs / (balls_bowled / 6),
+    strike_rate = runs / balls_bowled,
+    matches = n_distinct(match_id) 
+  ) |> 
+  filter(matches > 5) |> 
+  ggplot(aes(x = average, y = economy, size = wickets, color = bowling_team)) +
+  geom_point(alpha = 0.3, show.legend = TRUE) +
+  geom_vline(data = bowling_quadrant_lines, aes(xintercept = global_avg_average), linetype = "dotdash") +
+  geom_hline(data = bowling_quadrant_lines, aes(yintercept = global_avg_economy), linetype = "dotdash") +
+  scale_color_manual(values = c(England = "tomato2")) +
+  scale_x_continuous() +
+  scale_y_continuous() +
+  geom_text_repel(aes(label = bowler), max.overlaps = 5, show.legend = FALSE) +
+  theme_bw() +
+  theme(
+    plot.title = element_text(size = 22, colour = "black", face = "bold"),
+    plot.subtitle = element_text(size = 20, colour = "tomato2"),
+    panel.border = element_rect(color = "black", fill = NA),
+    legend.text = element_text(size = 10),
+    legend.key = element_blank(),
+    axis.title.x = element_text(size = 14),
+    axis.title.y = element_text(size = 14),
+    axis.text.x = element_text(size = 14),
+    axis.text.y = element_text(size = 14)
+  ) +
+  guides(
+    color = guide_legend(override.aes = list(size = 5)),
+  ) +
+  labs(
+    title = "BOWLING PERFORMANCE IN THE BAZBALL ERA",
+    caption = "Data from Cricsheet c/o R:cricketdata",
+    x = "Average",
+    y = "Economy",
+    color = "Team",
+    size = "Wickets"
+  )
+```
+
+<br>
+
+Compare England’s bowling performance across the two periods, including players with a minimum of 5 tests played before and after May 2022. Bazball bowlers are conceding more runs per wicket (average) at higher economy rate. How can this be helpful?
+
+<br>
+
+```{r Bowling Averages Pre/Post Bazball, fig.width = 10, fig.height = 6}
+# pre_bazball_players
+pre_bazball_bowlers <- test_bowling_data |>
+  filter(start_date < "2022-05-01") |> 
+  filter(bowling_team == 'England') |>
+  group_by(bowler) |> 
+  summarise(
+    balls_bowled = sum(balls_bowled),
+    runs = sum(runs),
+    wickets = sum(wickets),
+    average = runs / wickets,
+    economy = runs / (balls_bowled / 6),
+    strike_rate = runs / balls_bowled,
+    matches = n_distinct(match_id)
+  ) |> 
+  filter(matches > 5)
+
+# post_bazball_players
+post_bazball_bowlers <- test_bowling_data |>
+  filter(start_date >= "2022-05-01") |> 
+  filter(bowling_team == 'England') |>
+  group_by(bowler) |> 
+  summarise(
+    balls_bowled = sum(balls_bowled),
+    runs = sum(runs),
+    wickets = sum(wickets),
+    average = runs / wickets,
+    economy = runs / (balls_bowled / 6),
+    strike_rate = runs / balls_bowled,
+    matches = n_distinct(match_id)
+  ) |> 
+  filter(matches > 5)
+
+
+# Join Pre & Post
+pre_post_bazball_bowlers <- pre_bazball_bowlers |> 
+  inner_join(post_bazball_bowlers, join_by(bowler))
+
+# Bowling Comparison Table
+test_bowling_data |> 
+  inner_join(pre_post_bazball_bowlers, join_by(bowler)) |>
+  left_join(player_meta, join_by(bowler == unique_name)) |> 
+  filter(playing_role %in% c('Bowler', 'Allrounder')) |> 
+  group_by(bazball) |>
+  summarise(
+    balls_bowled = sum(balls_bowled),
+    runs = sum(runs),
+    wickets = sum(wickets),
+    average = runs / wickets,
+    economy = runs / (balls_bowled / 6),
+    strike_rate = runs / balls_bowled,
+    balls_per_wicket = balls_bowled / wickets,
+    matches = n_distinct(match_id)
+  ) |> 
+  arrange(desc(bazball)) |> 
+  knitr::kable(digits = 2, align = "c")
+```
+
+<br>
+
+Bazball’s methodology of avoiding draws in tests relies on taking 20 wickets to win. England's bowlers have reduced balls per wicket by 3.14, improving their ability to take 20 wickets faster than any other team, even if it means conceding more runs. Although seemingly nominal, this has helped England take 20 wickets at a better rate than any other team.
+
+<br>
+
+```{r Percentage of Matches with 20 Wickets Taken, fig.width = 10, fig.height = 6}
+library(tidytext)
+
+# Facet Labels
+era_names <- c(
+  `1` = "PRE_BAZBALL",
+  `2` = "BAZBALL"
+)
+
+# Plot
+test_bowling_data |> 
+  filter(!bowling_team == 'ICC World XI') |> 
+  group_by(match_id, bowling_team, bazball) |> 
+  summarise(
+    total_wickets = sum(wickets)
+  ) |> 
+  group_by(bowling_team, total_wickets, bazball) |> 
+  count() |> 
+  group_by(bowling_team, bazball) |> 
+  reframe(
+    total_wickets,
+    prop_20_wickets = n / sum(n)
+  ) |> 
+  filter(total_wickets == 20) |>
+  mutate(bowling_team = reorder_within(bowling_team, prop_20_wickets, bazball)) |> 
+  ggplot(aes(x = fct_reorder(bowling_team, prop_20_wickets), y = prop_20_wickets)) +
+  geom_col(aes(fill = bowling_team), alpha = 0.7, color = "black", show.legend = FALSE) +
+  geom_text(aes(label = scales::percent(round(prop_20_wickets,2)), vjust = -0.4)) +
+  scale_fill_manual(values = c(England___bazball = "tomato2", England___pre_bazball = "tomato2")) +
+  scale_y_continuous(labels = scales::percent) +
+  facet_wrap(~factor(bazball, c("pre_bazball", "bazball")), scales = "free_x") +
+  scale_x_reordered() +
+  theme_bw() +
+  theme(
+    plot.title = element_text(size = 22, colour = "black", face = "bold"),
+    plot.subtitle = element_text(size = 20, colour = "tomato2"),
+    panel.border = element_rect(color = "black", fill = NA),
+    legend.text = element_text(size = 10),
+    legend.position = c(0.07,0.93),
+    legend.box.background = element_rect(color = "black", size = 0.5),
+    legend.box.margin = margin(0.5, 5, 0.5, 0.5),
+    legend.title = element_blank(),
+    legend.background = element_blank(),
+    legend.key = element_blank(),
+    strip.text = element_text(size = 14, face = "bold"),
+    strip.background = element_rect(color = "black", fill = "lightgrey", linetype = "solid"),
+    axis.title.x = element_blank(),
+    axis.title.y = element_blank(),
+    axis.text.x = element_text(size = 10, angle = 45, vjust = 0.55),
+    axis.text.y = element_text(size = 14)
+  ) +
+  guides(
+    color = guide_legend(override.aes = list(size = 5))
+  ) +
+  labs(
+    title = "PERCENTAGE OF TESTS WITH 20 WICKETS TAKEN",
+    subtitle = "England are taking 20 wickets at a historically high rate in the bazball era",
+    caption = "Data from Cricsheet c/o R:cricketdata"
+  )
+```
+
+<br>
+
+Like their batting performance, this raises the question: How are England achieving such different results with largely the same group of players? Compare the distribution of wicket types between Bazball teams and England’s bowling attacks of the past.
+
+<br>
+
+```{r Bazball Wicket Type Distribution, fig.width = 10, fig.height = 6}
+# Plot
+test_bbb |> 
+  filter(!bowling_team == 'ICC World XI') |> 
+  filter(bowling_team == 'England') |>
+  filter(wicket_type %not_in% c('hit wicket', 'retired hurt')) |> 
+  filter(!is.na(wicket_type)) |> 
+  group_by(wicket_type, bazball) |> 
+  count() |> 
+  group_by(bazball) |> 
+  reframe(
+    wicket_type,
+    prop_wicket_type = n / sum(n)
+  ) |> 
+  arrange(wicket_type, desc(bazball)) |> 
+  pivot_wider(
+    names_from = bazball,
+    values_from = prop_wicket_type
+  ) |> 
+  ggplot(aes(y = fct_reorder(wicket_type, bazball))) +
+  geom_segment(aes(x = pre_bazball, xend = bazball, yend = wicket_type),
+               linewidth = 1.5, color = "darkgray") +
+  geom_point(aes(x = pre_bazball, y = wicket_type, colour = "Pre_Bazball"), size = 5) +
+  geom_text(aes(label = round(pre_bazball, 2), x = pre_bazball,
+                hjust = if_else((bazball - pre_bazball) > 0, 1.5, -0.5)),
+            size = 4, color = "black", show.legend = FALSE) +
+  geom_point(aes(x = bazball, y = wicket_type, colour = "Bazball"), size = 5) +
+  geom_text(aes(label = round(bazball, 2), x = bazball,
+                hjust = if_else((bazball - pre_bazball) < 0, 1.5, -0.5)),
+            size = 4, color = "black", show.legend = FALSE) +
+  scale_color_manual(values = c(Pre_Bazball = "lightsalmon", Bazball = "tomato2"),
+                     breaks = c("Pre_Bazball", "Bazball")) +
+  scale_x_continuous(limits = c(-0.05,1), breaks = seq(0, 1, by = 0.1)) +
+  theme_bw() +
+  theme(
+    plot.title = element_text(size = 22, colour = "black", face = "bold"),
+    plot.subtitle = element_text(size = 20, colour = "tomato2"),
+    panel.border = element_rect(color = "black", fill = NA),
+    legend.title = element_blank(),
+    legend.text = element_text(size = 10),
+    legend.key = element_blank(),
+    axis.title.x = element_text(size = 14),
+    axis.title.y = element_blank(),
+    axis.text.x = element_text(size = 14),
+    axis.text.y = element_text(size = 14)
+  ) +
+  guides(
+    color = guide_legend(override.aes = list(size = 5)),
+  ) +
+  labs(
+    title = "METHOD OF DISMISSAL PRE & POST BAZBALL",
+    subtitle = "England are taking a greater percentage of wickets in the field.",
+    caption = "Data from Cricsheet c/o R:cricketdata",
+    x = "Proportion of all Wickets Taken"
+  )
+```
+
+<br>
+
+Bazball attacks have shown a propensity to bowl off the stumps to encourage risker shots from opposing batsmen. Typically, balls bowled on the stumps elicit defensive play from the batsman, slowing down the pace of the game. This change has led to a 3% drop in LBW wickets and a comparable increase in ‘caught’ wickets.
+
+The bowling attack aims to give the batting unit control of its own fate, by providing both time and information. Bazball teams spent approximately 10.5 less overs per test match in the field and often bowl first when winning the toss, giving a clear target for their batsmen to chase with ample time to do so.
+
+<br>
+
+# **Does Bazball actually work?**
+
+Fourth innings chases make for excellent viewing and England has not shied away from providing some thrillers in recent times. Under Stokes' captaincy, England are opting to chase more than any other team and have posted an 11-5 record in fourth innings chases. Only Australia (7-3) is performing similarly in this timeframe.
+
+<br>
+
+```{r 4th Innings Chases, fig.width = 10, fig.height = 6}
+library(purrr)
+`%not_in%` <- purrr::negate(`%in%`)
+
+test_batting_data |> 
+  filter(bazball == 'bazball') |> 
+  group_by(match_id, batting_team, innings) |> 
+  summarise(
+    runs = sum(runs) + sum(extras),
+    dismissals = sum(dismissals)
+  ) |> 
+  group_by(match_id) |> 
+  arrange(innings, .by_group = TRUE) |> 
+  mutate(
+    innings_type = case_when(
+      innings %in% c('1','3')  ~ "set",
+      innings %in% c('2','4')  ~ "chase"
+    )
+  ) |> 
+  pivot_wider(
+    names_from = innings_type,
+    values_from = runs
+  ) |> 
+  mutate(
+    dismissal_count = case_when(
+      dismissals < 10    ~ "<10",
+      dismissals >= 10  ~ "10"
+    )
+  ) |> 
+  mutate(
+    set = replace_na(set, 0),
+    chase = replace_na(chase, 0)
+  ) |> 
+  group_by(match_id) |> 
+  mutate(
+    who_win = case_when(
+      sum(set) >= sum(chase) ~ "chase_no_win",
+      sum(set) < sum(chase)  ~ "chase_win"
+    )
+  ) |> 
+  filter(innings == '4') |> 
+  group_by(batting_team) |> 
+  count(who_win) |> 
+  pivot_wider(
+    names_from = who_win,
+    values_from = n
+  ) |> 
+  mutate(
+    chase_no_win = replace_na(chase_no_win, 0),
+    chase_win = replace_na(chase_win, 0)
+  ) |> 
+  pivot_longer(
+    cols = starts_with('chase'),
+    names_to = "result",
+    values_to = "count"
+  ) |>
+  filter(batting_team %not_in% c('South Africa', 'Sri Lanka', 'Zimbabwe', 'Ireland')) |> 
+  ggplot(aes(x  = fct_reorder(batting_team, count), y = count, fill = result)) +
+  geom_bar(stat = "identity", color = "black", alpha = 0.7) +
+  geom_text(aes(label = count), position = position_stack(vjust = 0.5)) +
+  scale_fill_manual(values = c('chase_win' = "tomato2", 'chase_no_win' = "lightsalmon"),
+                    limits = c("chase_win", "chase_no_win"),
+                    labels = c('Win', 'Loss')) +
+  coord_flip() +
+  theme_bw() +
+  theme(
+    plot.title = element_text(size = 22, colour = "black", face = "bold"),
+    plot.subtitle = element_text(size = 20, colour = "tomato2"),
+    legend.title = element_blank(),
+    legend.background = element_blank(),
+    legend.key = element_blank(),
+    axis.title.x = element_text(size = 12),
+    axis.title.y = element_blank(),
+    axis.text.x = element_text(size = 10),
+    axis.text.y = element_text(size = 10)
+  ) +
+  guides(
+    color = guide_legend(override.aes = list(size = 5))
+  ) +
+  labs(
+    title = "4TH INNINGS RUN CHASES",
+    subtitle = "Minimum 5 chases (Bazball era)",
+    caption = "Data from Cricsheet c/o R:cricketdata",
+    y = "Matches"
+  )
+```
+
+<br>
+
+Under McCullum and Stokes, the England men’s test team has achieved a 20-11-1 record. The 'Bazball' style has quickly revolutionised elements of test cricket that remained unchallenged for decades. While not without its challenges and critics, Bazball has gained global attention as a transformative era in test cricket.
+
+<br>
+
+# **Sources**
+
+Hyndman R, Gray C, Gupta S, Hyndman T, Rafique H, Tran J (2023). _cricketdata:
+  International Cricket Data_. R package version 0.2.3,
+  <https://CRAN.R-project.org/package=cricketdata>.
